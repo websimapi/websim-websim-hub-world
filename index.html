@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Websim Hub World</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+        
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            z-index: 100;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+        
+        #chat {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            width: 300px;
+            max-height: 200px;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 5px;
+            overflow-y: auto;
+            z-index: 100;
+        }
+        
+        #chatInput {
+            width: 100%;
+            padding: 5px;
+            border: none;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            border-radius: 3px;
+        }
+        
+        #chatMessages {
+            max-height: 150px;
+            overflow-y: auto;
+            padding: 5px;
+            color: white;
+            font-size: 12px;
+        }
+        
+        .chat-message {
+            margin: 2px 0;
+            word-wrap: break-word;
+        }
+        
+        .username {
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        
+        #controls {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+        
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 18px;
+            z-index: 1000;
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="loading">Loading Websim Hub...</div>
+        
+        <div id="ui" class="hidden">
+            <div>Position: <span id="position">0, 0, 0</span></div>
+            <div>Players: <span id="playerCount">0</span></div>
+            <div>FPS: <span id="fps">0</span></div>
+        </div>
+        
+        <div id="chat" class="hidden">
+            <div id="chatMessages"></div>
+            <input type="text" id="chatInput" placeholder="Type a message..." />
+        </div>
+        
+        <div id="controls" class="hidden">
+            <div>WASD: Move</div>
+            <div>Mouse: Look</div>
+            <div>Enter: Chat</div>
+            <div>F: Fullscreen</div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/PointerLockControls.js"></script>
+    <script src="https://esm.sh/nipplejs"></script>
+    
+    <script>
+        class WebsimHub {
+            constructor() {
+                this.scene = null;
+                this.camera = null;
+                this.renderer = null;
+                this.controls = null;
+                this.room = null;
+                this.avatars = new Map();
+                this.world = null;
+                this.player = null;
+                this.clock = new THREE.Clock();
+                this.keys = {};
+                this.chatVisible = false;
+                this.lastUpdate = 0;
+                this.frameCount = 0;
+                this.lastFpsUpdate = 0;
+                
+                // World boundaries (32x32 meters)
+                this.worldSize = 32;
+                this.worldBounds = {
+                    minX: -this.worldSize / 2,
+                    maxX: this.worldSize / 2,
+                    minZ: -this.worldSize / 2,
+                    maxZ: this.worldSize / 2
+                };
+                
+                this.init();
+            }
+            
+            async init() {
+                try {
+                    await this.initMultiplayer();
+                    await this.initThree();
+                    await this.initWorld();
+                    await this.initPlayer();
+                    this.initControls();
+                    this.initUI();
+                    this.startGameLoop();
+                    
+                    document.getElementById('loading').classList.add('hidden');
+                    document.getElementById('ui').classList.remove('hidden');
+                    document.getElementById('chat').classList.remove('hidden');
+                    document.getElementById('controls').classList.remove('hidden');
+                } catch (error) {
+                    console.error('Initialization error:', error);
+                }
+            }
+            
+            async initMultiplayer() {
+                this.room = new WebsimSocket();
+                await this.room.initialize();
+                
+                this.room.subscribePresence((presence) => {
+                    this.updateAvatars(presence);
+                });
+                
+                this.room.onmessage = (event) => {
+                    const data = event.data;
+                    switch (data.type) {
+                        case 'connected':
+                            this.addChatMessage(`${data.username} joined the hub`);
+                            break;
+                        case 'disconnected':
+                            this.addChatMessage(`${data.username} left the hub`);
+                            break;
+                        case 'chat':
+                            this.addChatMessage(`${data.username}: ${data.message}`);
+                            break;
+                    }
+                };
+            }
+            
+            async initThree() {
+                // Scene
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x87CEEB); // Sky blue
+                
+                // Camera
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.camera.position.set(0, 1.7, 5); // Eye level height
+                
+                // Renderer
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.shadowMap.enabled = true;
+                this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                this.renderer.xr.enabled = true; // Enable XR
+                document.getElementById('container').appendChild(this.renderer.domElement);
+                
+                // Lighting
+                const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+                this.scene.add(ambientLight);
+                
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(50, 100, 50);
+                directionalLight.castShadow = true;
+                directionalLight.shadow.mapSize.width = 2048;
+                directionalLight.shadow.mapSize.height = 2048;
+                directionalLight.shadow.camera.near = 0.5;
+                directionalLight.shadow.camera.far = 500;
+                directionalLight.shadow.camera.left = -100;
+                directionalLight.shadow.camera.right = 100;
+                directionalLight.shadow.camera.top = 100;
+                directionalLight.shadow.camera.bottom = -100;
+                this.scene.add(directionalLight);
+                
+                // Handle window resize
+                window.addEventListener('resize', () => {
+                    this.camera.aspect = window.innerWidth / window.innerHeight;
+                    this.camera.updateProjectionMatrix();
+                    this.renderer.setSize(window.innerWidth, window.innerHeight);
+                });
+            }
+            
+            async initWorld() {
+                this.world = new THREE.Group();
+                this.scene.add(this.world);
+                
+                // Ground (32x32 meters)
+                const groundGeometry = new THREE.PlaneGeometry(this.worldSize, this.worldSize);
+                const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x4CAF50 });
+                const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+                ground.rotation.x = -Math.PI / 2;
+                ground.receiveShadow = true;
+                this.world.add(ground);
+                
+                // Invisible barriers
+                this.createBarriers();
+                
+                // Add some basic structures
+                this.createHubStructures();
+                
+                // Grid helper for development
+                const gridHelper = new THREE.GridHelper(this.worldSize, this.worldSize);
+                gridHelper.position.y = 0.01;
+                this.world.add(gridHelper);
+            }
+            
+            createBarriers() {
+                const barrierHeight = 10;
+                const barrierThickness = 1;
+                
+                // Create invisible walls
+                const barrierMaterial = new THREE.MeshBasicMaterial({ 
+                    transparent: true, 
+                    opacity: 0,
+                    color: 0xff0000 
+                });
+                
+                // North wall
+                const northWall = new THREE.Mesh(
+                    new THREE.BoxGeometry(this.worldSize, barrierHeight, barrierThickness),
+                    barrierMaterial
+                );
+                northWall.position.set(0, barrierHeight / 2, this.worldBounds.maxZ);
+                this.world.add(northWall);
+                
+                // South wall
+                const southWall = new THREE.Mesh(
+                    new THREE.BoxGeometry(this.worldSize, barrierHeight, barrierThickness),
+                    barrierMaterial
+                );
+                southWall.position.set(0, barrierHeight / 2, this.worldBounds.minZ);
+                this.world.add(southWall);
+                
+                // East wall
+                const eastWall = new THREE.Mesh(
+                    new THREE.BoxGeometry(barrierThickness, barrierHeight, this.worldSize),
+                    barrierMaterial
+                );
+                eastWall.position.set(this.worldBounds.maxX, barrierHeight / 2, 0);
+                this.world.add(eastWall);
+                
+                // West wall
+                const westWall = new THREE.Mesh(
+                    new THREE.BoxGeometry(barrierThickness, barrierHeight, this.worldSize),
+                    barrierMaterial
+                );
+                westWall.position.set(this.worldBounds.minX, barrierHeight / 2, 0);
+                this.world.add(westWall);
+            }
+            
+            createHubStructures() {
+                // Central hub platform
+                const platformGeometry = new THREE.CylinderGeometry(5, 5, 0.5, 16);
+                const platformMaterial = new THREE.MeshLambertMaterial({ color: 0x2196F3 });
+                const platform = new THREE.Mesh(platformGeometry, platformMaterial);
+                platform.position.set(0, 0.25, 0);
+                platform.castShadow = true;
+                platform.receiveShadow = true;
+                this.world.add(platform);
+                
+                // Welcome pillar
+                const pillarGeometry = new THREE.CylinderGeometry(0.5, 0.5, 3, 8);
+                const pillarMaterial = new THREE.MeshLambertMaterial({ color: 0x9C27B0 });
+                const pillar = new THREE.Mesh(pillarGeometry, pillarMaterial);
+                pillar.position.set(0, 2, 0);
+                pillar.castShadow = true;
+                this.world.add(pillar);
+                
+                // Portal areas (placeholders)
+                this.createPortalAreas();
+                
+                // Some decorative elements
+                this.createDecorations();
+            }
+            
+            createPortalAreas() {
+                const portalPositions = [
+                    { x: 10, z: 10 },
+                    { x: -10, z: 10 },
+                    { x: 10, z: -10 },
+                    { x: -10, z: -10 }
+                ];
+                
+                portalPositions.forEach((pos, index) => {
+                    const portalGeometry = new THREE.RingGeometry(2, 3, 16);
+                    const portalMaterial = new THREE.MeshBasicMaterial({ 
+                        color: 0x00ff00,
+                        transparent: true,
+                        opacity: 0.3,
+                        side: THREE.DoubleSide
+                    });
+                    const portal = new THREE.Mesh(portalGeometry, portalMaterial);
+                    portal.position.set(pos.x, 1.5, pos.z);
+                    portal.userData = { type: 'portal', id: index };
+                    this.world.add(portal);
+                    
+                    // Portal base
+                    const baseGeometry = new THREE.CylinderGeometry(3.5, 3.5, 0.3, 16);
+                    const baseMaterial = new THREE.MeshLambertMaterial({ color: 0x757575 });
+                    const base = new THREE.Mesh(baseGeometry, baseMaterial);
+                    base.position.set(pos.x, 0.15, pos.z);
+                    base.castShadow = true;
+                    base.receiveShadow = true;
+                    this.world.add(base);
+                });
+            }
+            
+            createDecorations() {
+                // Add some trees
+                for (let i = 0; i < 8; i++) {
+                    const angle = (i / 8) * Math.PI * 2;
+                    const radius = 12;
+                    const x = Math.cos(angle) * radius;
+                    const z = Math.sin(angle) * radius;
+                    
+                    // Tree trunk
+                    const trunkGeometry = new THREE.CylinderGeometry(0.3, 0.3, 4, 8);
+                    const trunkMaterial = new THREE.MeshLambertMaterial({ color: 0x8D6E63 });
+                    const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+                    trunk.position.set(x, 2, z);
+                    trunk.castShadow = true;
+                    this.world.add(trunk);
+                    
+                    // Tree leaves
+                    const leavesGeometry = new THREE.SphereGeometry(2, 8, 6);
+                    const leavesMaterial = new THREE.MeshLambertMaterial({ color: 0x4CAF50 });
+                    const leaves = new THREE.Mesh(leavesGeometry, leavesMaterial);
+                    leaves.position.set(x, 5, z);
+                    leaves.castShadow = true;
+                    this.world.add(leaves);
+                }
+            }
+            
+            async initPlayer() {
+                this.player = {
+                    position: new THREE.Vector3(0, 1.7, 5),
+                    rotation: new THREE.Euler(0, 0, 0),
+                    velocity: new THREE.Vector3(),
+                    speed: 5,
+                    jumpForce: 8,
+                    grounded: true
+                };
+                
+                // Update initial presence
+                this.room.updatePresence({
+                    position: this.player.position.toArray(),
+                    rotation: this.player.rotation.toArray(),
+                    username: this.room.peers[this.room.clientId]?.username || 'Unknown'
+                });
+            }
+            
+            initControls() {
+                this.controls = new THREE.PointerLockControls(this.camera, this.renderer.domElement);
+                this.scene.add(this.controls.getObject());
+                
+                // Click to play
+                this.renderer.domElement.addEventListener('click', () => {
+                    if (!this.chatVisible) {
+                        this.controls.lock();
+                    }
+                });
+                
+                // Keyboard controls
+                document.addEventListener('keydown', (event) => {
+                    if (event.code === 'Enter') {
+                        this.toggleChat();
+                        return;
+                    }
+                    
+                    if (event.code === 'KeyF') {
+                        this.toggleFullscreen();
+                        return;
+                    }
+                    
+                    if (!this.chatVisible) {
+                        this.keys[event.code] = true;
+                    }
+                });
+                
+                document.addEventListener('keyup', (event) => {
+                    this.keys[event.code] = false;
+                });
+                
+                // Mobile controls
+                if ('ontouchstart' in window) {
+                    this.initMobileControls();
+                }
+            }
+            
+            initMobileControls() {
+                // Create virtual joystick for mobile
+                const joystick = nipplejs.create({
+                    zone: document.body,
+                    mode: 'static',
+                    position: { left: '80px', bottom: '80px' },
+                    color: 'white',
+                    size: 120
+                });
+                
+                joystick.on('move', (evt, data) => {
+                    const forward = data.vector.y;
+                    const right = -data.vector.x;
+                    
+                    this.keys['KeyW'] = forward > 0.3;
+                    this.keys['KeyS'] = forward < -0.3;
+                    this.keys['KeyA'] = right < -0.3;
+                    this.keys['KeyD'] = right > 0.3;
+                });
+                
+                joystick.on('end', () => {
+                    this.keys['KeyW'] = false;
+                    this.keys['KeyS'] = false;
+                    this.keys['KeyA'] = false;
+                    this.keys['KeyD'] = false;
+                });
+            }
+            
+            initUI() {
+                // Chat input
+                const chatInput = document.getElementById('chatInput');
+                chatInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        const message = chatInput.value.trim();
+                        if (message) {
+                            this.sendChatMessage(message);
+                            chatInput.value = '';
+                        }
+                        this.toggleChat();
+                    }
+                });
+                
+                chatInput.addEventListener('blur', () => {
+                    this.toggleChat();
+                });
+            }
+            
+            toggleChat() {
+                this.chatVisible = !this.chatVisible;
+                const chatInput = document.getElementById('chatInput');
+                
+                if (this.chatVisible) {
+                    this.controls.unlock();
+                    chatInput.focus();
+                } else {
+                    chatInput.blur();
+                }
+            }
+            
+            toggleFullscreen() {
+                if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen();
+                } else {
+                    document.exitFullscreen();
+                }
+            }
+            
+            sendChatMessage(message) {
+                this.room.send({
+                    type: 'chat',
+                    message: message
+                });
+            }
+            
+            addChatMessage(message) {
+                const chatMessages = document.getElementById('chatMessages');
+                const messageElement = document.createElement('div');
+                messageElement.className = 'chat-message';
+                messageElement.textContent = message;
+                chatMessages.appendChild(messageElement);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                
+                // Limit message history
+                while (chatMessages.children.length > 50) {
+                    chatMessages.removeChild(chatMessages.firstChild);
+                }
+            }
+            
+            updatePlayer(deltaTime) {
+                if (!this.controls.isLocked) return;
+                
+                const velocity = this.player.velocity;
+                const direction = new THREE.Vector3();
+                
+                // Movement
+                if (this.keys['KeyW']) direction.z -= 1;
+                if (this.keys['KeyS']) direction.z += 1;
+                if (this.keys['KeyA']) direction.x -= 1;
+                if (this.keys['KeyD']) direction.x += 1;
+                
+                // Normalize diagonal movement
+                if (direction.length() > 0) {
+                    direction.normalize();
+                }
+                
+                // Apply movement
+                velocity.x = direction.x * this.player.speed;
+                velocity.z = direction.z * this.player.speed;
+                
+                // Jump
+                if (this.keys['Space'] && this.player.grounded) {
+                    velocity.y = this.player.jumpForce;
+                    this.player.grounded = false;
+                }
+                
+                // Gravity
+                velocity.y -= 20 * deltaTime;
+                
+                // Apply velocity
+                this.controls.moveRight(velocity.x * deltaTime);
+                this.controls.moveForward(-velocity.z * deltaTime);
+                
+                // Update camera position
+                const object = this.controls.getObject();
+                object.position.y += velocity.y * deltaTime;
+                
+                // Ground collision
+                if (object.position.y <= 1.7) {
+                    velocity.y = 0;
+                    object.position.y = 1.7;
+                    this.player.grounded = true;
+                }
+                
+                // World boundaries
+                this.enforceBoundaries(object);
+                
+                // Update player data
+                this.player.position.copy(object.position);
+                this.player.rotation.copy(object.rotation);
+                
+                // Update presence (throttled)
+                const now = Date.now();
+                if (now - this.lastUpdate > 50) { // 20 FPS updates
+                    this.room.updatePresence({
+                        position: this.player.position.toArray(),
+                        rotation: this.player.rotation.toArray(),
+                        username: this.room.peers[this.room.clientId]?.username || 'Unknown'
+                    });
+                    this.lastUpdate = now;
+                }
+            }
+            
+            enforceBoundaries(object) {
+                object.position.x = Math.max(this.worldBounds.minX + 0.5, 
+                                           Math.min(this.worldBounds.maxX - 0.5, object.position.x));
+                object.position.z = Math.max(this.worldBounds.minZ + 0.5, 
+                                           Math.min(this.worldBounds.maxZ - 0.5, object.position.z));
+            }
+            
+            updateAvatars(presence) {
+                const currentPlayers = Object.keys(presence);
+                
+                // Remove disconnected players
+                for (const [clientId, avatar] of this.avatars) {
+                    if (!currentPlayers.includes(clientId)) {
+                        this.scene.remove(avatar);
+                        this.avatars.delete(clientId);
+                    }
+                }
+                
+                // Update/create avatars
+                for (const [clientId, playerData] of Object.entries(presence)) {
+                    if (clientId === this.room.clientId) continue; // Skip self
+                    
+                    let avatar = this.avatars.get(clientId);
+                    if (!avatar) {
+                        avatar = this.createAvatar(playerData);
+                        this.avatars.set(clientId, avatar);
+                        this.scene.add(avatar);
+                    }
+                    
+                    // Update avatar position
+                    if (playerData.position) {
+                        avatar.position.fromArray(playerData.position);
+                    }
+                    
+                    // Update avatar rotation
+                    if (playerData.rotation) {
+                        avatar.rotation.fromArray(playerData.rotation);
+                    }
+                }
+                
+                // Update UI
+                document.getElementById('playerCount').textContent = currentPlayers.length;
+            }
+            
+            createAvatar(playerData) {
+                const avatar = new THREE.Group();
+                
+                // Body
+                const bodyGeometry = new THREE.CapsuleGeometry(0.3, 1.4, 4, 8);
+                const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0x0066cc });
+                const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+                body.position.y = -0.7;
+                body.castShadow = true;
+                avatar.add(body);
+                
+                // Head
+                const headGeometry = new THREE.SphereGeometry(0.25, 8, 6);
+                const headMaterial = new THREE.MeshLambertMaterial({ color: 0xffdbac });
+                const head = new THREE.Mesh(headGeometry, headMaterial);
+                head.position.y = 0.25;
+                head.castShadow = true;
+                avatar.add(head);
+                
+                // Name tag
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.width = 256;
+                canvas.height = 64;
+                context.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                context.fillRect(0, 0, canvas.width, canvas.height);
+                context.fillStyle = 'white';
+                context.font = '24px Arial';
+                context.textAlign = 'center';
+                context.fillText(playerData.username || 'Unknown', canvas.width / 2, 40);
+                
+                const texture = new THREE.CanvasTexture(canvas);
+                const nameTagMaterial = new THREE.MeshBasicMaterial({ 
+                    map: texture, 
+                    transparent: true 
+                });
+                const nameTagGeometry = new THREE.PlaneGeometry(2, 0.5);
+                const nameTag = new THREE.Mesh(nameTagGeometry, nameTagMaterial);
+                nameTag.position.y = 1;
+                nameTag.lookAt(this.camera.position);
+                avatar.add(nameTag);
+                
+                return avatar;
+            }
+            
+            updateUI() {
+                const object = this.controls.getObject();
+                const position = object.position;
+                document.getElementById('position').textContent = 
+                    `${position.x.toFixed(1)}, ${position.y.toFixed(1)}, ${position.z.toFixed(1)}`;
+                
+                // FPS counter
+                this.frameCount++;
+                const now = Date.now();
+                if (now - this.lastFpsUpdate > 1000) {
+                    document.getElementById('fps').textContent = this.frameCount;
+                    this.frameCount = 0;
+                    this.lastFpsUpdate = now;
+                }
+            }
+            
+            animate() {
+                const deltaTime = this.clock.getDelta();
+                
+                this.updatePlayer(deltaTime);
+                this.updateUI();
+                
+                // Animate portals
+                this.world.children.forEach(child => {
+                    if (child.userData.type === 'portal') {
+                        child.rotation.y += deltaTime;
+                    }
+                });
+                
+                this.renderer.render(this.scene, this.camera);
+            }
+            
+            startGameLoop() {
+                this.renderer.setAnimationLoop(() => {
+                    this.animate();
+                });
+            }
+        }
+        
+        // Initialize the hub when the page loads
+        window.addEventListener('load', () => {
+            new WebsimHub();
+        });
+    </script>
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
+
